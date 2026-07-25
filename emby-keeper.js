@@ -1,17 +1,17 @@
 WidgetMetadata = {
   id: "embyKeeper",
   title: "Emby 自动保号",
-  version: "1.2.0",
+  version: "1.3.0",
   requiredVersion: "0.0.1",
-  description: "手动填写 Emby 服务器和账号，点击模块后从指定资源库随机模拟观看一次。",
+  description: "首页加载时检查间隔，到期后从指定 Emby 资源库随机模拟观看一次。",
   author: "Codex",
   site: "https://emby.media",
   detailCacheDuration: 0,
   modules: [
     {
       id: "runKeepAlive",
-      title: "执行一次保号",
-      description: "点击后自动登录 Emby、随机选择影片并上报一次观看进度。",
+      title: "保号检查",
+      description: "适合放在 Forward 首页：每次加载先检查间隔，未到期不会请求 Emby。",
       functionName: "runKeepAlive",
       cacheDuration: 0,
       params: [
@@ -35,13 +35,13 @@ WidgetMetadata = {
           name: "password",
           title: "Emby 密码",
           type: "input",
-          description: "ForwardWidget 目前只有普通输入框；请只在你自己的设备上保存。",
+          description: "ForwardWidget 当前是普通输入框，请只在自己的设备上保存。",
         },
         {
           name: "libraryName",
           title: "资源库名称",
           type: "input",
-          description: "可留空，留空会在账号可访问的全部电影/剧集库里随机选择。",
+          description: "留空代表全部电影/剧集库；填写后按名称模糊匹配。",
           placeholders: [
             { title: "留空：全部资源库", value: "" },
             { title: "例如：动画", value: "动画" },
@@ -49,11 +49,18 @@ WidgetMetadata = {
           ],
         },
         {
+          name: "intervalDays",
+          title: "每隔多少天执行",
+          type: "count",
+          value: "7",
+          description: "首页加载时检查；未到间隔只显示状态，不执行保号。",
+        },
+        {
           name: "playDuration",
           title: "播放时长（秒）",
           type: "count",
           value: "300",
-          description: "从影片 5-10% 位置开始，上报时长会额外随机增加 0-10%。",
+          description: "从影片 5-10% 位置开始，上报时长额外随机增加 0-10%。",
         },
         {
           name: "markWatched",
@@ -63,6 +70,17 @@ WidgetMetadata = {
           enumOptions: [
             { title: "是", value: "true" },
             { title: "否", value: "false" },
+          ],
+        },
+        {
+          name: "forceRun",
+          title: "强制执行一次",
+          type: "enumeration",
+          value: "false",
+          description: "用于测试；选择“是”会忽略间隔。",
+          enumOptions: [
+            { title: "否", value: "false" },
+            { title: "是", value: "true" },
           ],
         },
         {
@@ -80,6 +98,7 @@ WidgetMetadata = {
           title: "设备名称",
           type: "input",
           value: "Forward",
+          description: "显示在 Emby 后台的设备名。",
           belongTo: { paramName: "advanced", value: ["show"] },
         },
         {
@@ -96,6 +115,7 @@ WidgetMetadata = {
 };
 
 const TICKS_PER_SECOND = 10000000;
+const STORE_PREFIX = "embyKeeper";
 
 function cleanBaseUrl(url) {
   return String(url || "").trim().replace(/\/+$/, "");
@@ -109,7 +129,9 @@ function requireText(params, name, label) {
 
 function requireServerUrl(params) {
   const value = requireText(params, "serverUrl", "Emby 服务器地址");
-  if (!/^https?:\/\//i.test(value)) throw new Error("Emby 服务器地址需要以 http:// 或 https:// 开头");
+  if (!/^https?:\/\//i.test(value)) {
+    throw new Error("Emby 服务器地址需要以 http:// 或 https:// 开头");
+  }
   return cleanBaseUrl(value);
 }
 
@@ -134,10 +156,10 @@ function deviceId(params) {
 
 function authHeader(params, token) {
   const parts = [
-    `MediaBrowser Client="Forward"`,
+    'MediaBrowser Client="Forward"',
     `Device="${getDeviceName(params)}"`,
     `DeviceId="${deviceId(params)}"`,
-    `Version="1.0.0"`,
+    'Version="1.0.0"',
   ];
   if (token) parts.push(`Token="${token}"`);
   return parts.join(", ");
@@ -204,6 +226,13 @@ function pickOne(items) {
   return items[Math.floor(Math.random() * items.length)];
 }
 
+function storageKey(params) {
+  const server = cleanBaseUrl(params.serverUrl).replace(/^https?:\/\//i, "");
+  const user = String(params.username || "").trim();
+  const library = String(params.libraryName || "all").trim() || "all";
+  return `${STORE_PREFIX}:${server}:${user}:${library}`;
+}
+
 function formatTime(ms) {
   if (!ms) return "从未执行";
   try {
@@ -262,10 +291,14 @@ async function reportPlayback(params, auth, item) {
   const startSeconds = runtimeSeconds > 0 ? Math.floor(runtimeSeconds * startRatio) : 0;
   const randomExtra = Math.floor(playDuration * Math.random() * 0.1);
   const desiredWatchSeconds = playDuration + randomExtra;
-  const maxWatchSeconds = runtimeSeconds > 0 ? Math.max(1, Math.floor(runtimeSeconds * 0.97) - startSeconds) : desiredWatchSeconds;
+  const maxWatchSeconds = runtimeSeconds > 0
+    ? Math.max(1, Math.floor(runtimeSeconds * 0.97) - startSeconds)
+    : desiredWatchSeconds;
   const watchedSeconds = Math.min(desiredWatchSeconds, maxWatchSeconds);
   const endSeconds = startSeconds + watchedSeconds;
-  const mediaSourceId = item.MediaSources && item.MediaSources[0] && item.MediaSources[0].Id ? item.MediaSources[0].Id : item.Id;
+  const mediaSourceId = item.MediaSources && item.MediaSources[0] && item.MediaSources[0].Id
+    ? item.MediaSources[0].Id
+    : item.Id;
   const playSessionId = `forward-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 
   await embyPost(params, "/Sessions/Playing", {
@@ -302,10 +335,30 @@ async function reportPlayback(params, auth, item) {
 async function runKeepAlive(params = {}) {
   try {
     const now = Date.now();
+    const key = storageKey(params);
+    const intervalDays = numberParam(params.intervalDays, 7, 1);
+    const intervalMs = intervalDays * 24 * 60 * 60 * 1000;
+    const lastRun = Number(Widget.storage.get(key) || 0);
+    const forceRun = boolParam(params.forceRun, false);
+    const targetLibrary = String(params.libraryName || "全部资源库").trim() || "全部资源库";
+
+    if (!forceRun && lastRun > 0 && now - lastRun < intervalMs) {
+      return [
+        statusItem("skipped", "保号未到时间", [
+          `资源库：${targetLibrary}`,
+          `上次执行：${formatTime(lastRun)}`,
+          `下次执行：${formatTime(lastRun + intervalMs)}`,
+          `执行间隔：${intervalDays} 天`,
+          "首页已检查，本次不会请求 Emby。",
+        ].join("\n")),
+      ];
+    }
+
     const auth = await authenticate(params);
     const libraries = await getLibraries(params, auth);
     const picked = await getRandomItem(params, auth, libraries);
     const playback = await reportPlayback(params, auth, picked.item);
+    Widget.storage.set(key, String(now));
 
     const title = picked.item.SeriesName
       ? `${picked.item.SeriesName} - ${picked.item.Name || picked.item.Id}`
@@ -319,7 +372,8 @@ async function runKeepAlive(params = {}) {
         `模拟观看：${playback.watchedSeconds} 秒`,
         `播放区间：${playback.startSeconds}s - ${playback.endSeconds}s`,
         `标记已看：${boolParam(params.markWatched, true) ? "是" : "否"}`,
-        `执行时间：${formatTime(now)}`,
+        `本次执行：${formatTime(now)}`,
+        `下次执行：${formatTime(now + intervalMs)}`,
       ].join("\n"), posterPath ? { posterPath } : {}),
     ];
   } catch (error) {
@@ -329,5 +383,9 @@ async function runKeepAlive(params = {}) {
 }
 
 async function loadDetail(link) {
-  return statusItem(String(link || "help"), "Emby 自动保号", "打开“执行一次保号”模块即可手动运行一次。");
+  return statusItem(
+    String(link || "help"),
+    "Emby 自动保号",
+    "放在 Forward 首页时，每次首页加载会检查间隔；未到期不会请求 Emby。"
+  );
 }
