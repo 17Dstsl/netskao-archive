@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "embyKeeper",
   title: "Emby 自动保号",
-  version: "1.3.0",
+  version: "1.4.0",
   requiredVersion: "0.0.1",
   description: "首页加载时检查间隔，到期后从指定 Emby 资源库随机模拟观看一次。",
   author: "Codex",
@@ -49,11 +49,11 @@ WidgetMetadata = {
           ],
         },
         {
-          name: "intervalDays",
-          title: "每隔多少天执行",
+          name: "intervalHours",
+          title: "每隔多少小时执行",
           type: "count",
-          value: "7",
-          description: "首页加载时检查；未到间隔只显示状态，不执行保号。",
+          value: "168",
+          description: "首页加载时检查；未到间隔只显示状态，不执行保号。168 小时约等于 7 天。",
         },
         {
           name: "playDuration",
@@ -107,6 +107,14 @@ WidgetMetadata = {
           type: "count",
           value: "3",
           description: "随机资源为空时换库或换片重试。",
+          belongTo: { paramName: "advanced", value: ["show"] },
+        },
+        {
+          name: "intervalJitterHours",
+          title: "间隔随机延迟（小时）",
+          type: "count",
+          value: "0",
+          description: "下次执行时间额外增加 0 到该值之间的随机小时数；0 表示关闭。",
           belongTo: { paramName: "advanced", value: ["show"] },
         },
       ],
@@ -233,6 +241,10 @@ function storageKey(params) {
   return `${STORE_PREFIX}:${server}:${user}:${library}`;
 }
 
+function jitterStorageKey(params) {
+  return `${storageKey(params)}:nextDue`;
+}
+
 function formatTime(ms) {
   if (!ms) return "从未执行";
   try {
@@ -336,19 +348,22 @@ async function runKeepAlive(params = {}) {
   try {
     const now = Date.now();
     const key = storageKey(params);
-    const intervalDays = numberParam(params.intervalDays, 7, 1);
-    const intervalMs = intervalDays * 24 * 60 * 60 * 1000;
+    const nextDueKey = jitterStorageKey(params);
+    const intervalHours = numberParam(params.intervalHours, 168, 1);
+    const intervalMs = intervalHours * 60 * 60 * 1000;
     const lastRun = Number(Widget.storage.get(key) || 0);
+    const storedNextDue = Number(Widget.storage.get(nextDueKey) || 0);
+    const nextDue = storedNextDue || (lastRun ? lastRun + intervalMs : 0);
     const forceRun = boolParam(params.forceRun, false);
     const targetLibrary = String(params.libraryName || "全部资源库").trim() || "全部资源库";
 
-    if (!forceRun && lastRun > 0 && now - lastRun < intervalMs) {
+    if (!forceRun && nextDue > 0 && now < nextDue) {
       return [
         statusItem("skipped", "保号未到时间", [
           `资源库：${targetLibrary}`,
           `上次执行：${formatTime(lastRun)}`,
-          `下次执行：${formatTime(lastRun + intervalMs)}`,
-          `执行间隔：${intervalDays} 天`,
+          `下次执行：${formatTime(nextDue)}`,
+          `执行间隔：${intervalHours} 小时`,
           "首页已检查，本次不会请求 Emby。",
         ].join("\n")),
       ];
@@ -358,7 +373,11 @@ async function runKeepAlive(params = {}) {
     const libraries = await getLibraries(params, auth);
     const picked = await getRandomItem(params, auth, libraries);
     const playback = await reportPlayback(params, auth, picked.item);
+    const jitterHours = numberParam(params.intervalJitterHours, 0, 0);
+    const jitterMs = jitterHours > 0 ? Math.floor(Math.random() * jitterHours * 60 * 60 * 1000) : 0;
+    const newNextDue = now + intervalMs + jitterMs;
     Widget.storage.set(key, String(now));
+    Widget.storage.set(nextDueKey, String(newNextDue));
 
     const title = picked.item.SeriesName
       ? `${picked.item.SeriesName} - ${picked.item.Name || picked.item.Id}`
@@ -373,7 +392,9 @@ async function runKeepAlive(params = {}) {
         `播放区间：${playback.startSeconds}s - ${playback.endSeconds}s`,
         `标记已看：${boolParam(params.markWatched, true) ? "是" : "否"}`,
         `本次执行：${formatTime(now)}`,
-        `下次执行：${formatTime(now + intervalMs)}`,
+        `执行间隔：${intervalHours} 小时`,
+        `随机延迟：${Math.round(jitterMs / 60000)} 分钟`,
+        `下次执行：${formatTime(newNextDue)}`,
       ].join("\n"), posterPath ? { posterPath } : {}),
     ];
   } catch (error) {
