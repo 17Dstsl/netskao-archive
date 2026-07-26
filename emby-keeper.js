@@ -1,10 +1,11 @@
 WidgetMetadata = {
   id: "embyKeeper",
   title: "Emby 自动保号",
-  version: "2.0.0",
+  version: "2.1.0",
   requiredVersion: "0.0.1",
   description: "先保存 Emby 配置，再把首页保号检查添加到 Forward 首页；首页加载时到期才执行。",
   author: "Codex",
+  description: "\u53ea\u9700\u6dfb\u52a0\u201c\u4fdd\u5b58\u914d\u7f6e\u201d\u5230\u9996\u9875\uff1b\u9996\u9875\u52a0\u8f7d\u65f6\u4fdd\u5b58\u5f53\u524d\u53c2\u6570\uff0c\u5e76\u6309\u8bbe\u7f6e\u7684\u5c0f\u65f6\u95f4\u9694\u81ea\u52a8\u68c0\u67e5\u4fdd\u53f7\u3002",
   site: "https://emby.media",
   detailCacheDuration: 0,
   modules: [
@@ -13,6 +14,7 @@ WidgetMetadata = {
       title: "保存配置",
       description: "首次使用先运行这里；首页卡片会读取这份配置。",
       functionName: "saveConfig",
+      description: "\u6b64\u6a21\u5757\u540c\u65f6\u662f\u914d\u7f6e\u5165\u53e3\u548c\u9996\u9875\u81ea\u52a8\u68c0\u67e5\uff1b\u6dfb\u52a0\u540e\u53ef\u5728\u201c\u4fee\u6539\u6570\u636e\u6e90\u201d\u4e2d\u8c03\u6574\u6240\u6709\u53c2\u6570\u3002",
       cacheDuration: 0,
       params: [
         {
@@ -46,21 +48,21 @@ WidgetMetadata = {
         {
           name: "intervalHours",
           title: "每隔多少小时执行",
-          type: "count",
+          type: "input",
           value: "168",
           description: "首页加载时检查；未到间隔只显示状态，不执行保号。",
         },
         {
           name: "intervalJitterHours",
           title: "间隔随机延迟（小时）",
-          type: "count",
+          type: "input",
           value: "0",
           description: "下次执行时间额外增加 0 到该值之间的随机小时数；0 表示关闭。",
         },
         {
           name: "playDuration",
           title: "播放时长（秒）",
-          type: "count",
+          type: "input",
           value: "300",
           description: "从影片 5-10% 位置开始，上报时长额外随机增加 0-10%。",
         },
@@ -95,13 +97,15 @@ WidgetMetadata = {
         {
           name: "maxRetries",
           title: "最大重试次数",
-          type: "count",
+          type: "input",
           value: "3",
           description: "随机资源为空时换库或换片重试。",
           belongTo: { paramName: "advanced", value: ["show"] },
         },
       ],
     },
+  ],
+  legacyModules: [
     {
       id: "homeCheck",
       title: "首页保号检查",
@@ -259,7 +263,7 @@ function storageKey(config) {
 }
 
 function nextDueKey(config) {
-  return `${storageKey(config)}:nextDue`;
+  return `${storageKey(config)}:${config.intervalHours}:${config.intervalJitterHours}:nextDue`;
 }
 
 function formatTime(ms) {
@@ -427,6 +431,7 @@ async function saveConfig(params = {}) {
   try {
     const config = normalizeConfig(params);
     Widget.storage.set(CONFIG_KEY, JSON.stringify(config));
+    return executeKeepAlive(config, false);
     const targetLibrary = config.libraryName || "全部资源库";
     return [
       statusItem("config-saved", "配置已保存", [
