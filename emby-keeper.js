@@ -1,18 +1,18 @@
 WidgetMetadata = {
   id: "embyKeeper",
   title: "Emby 自动保号",
-  version: "1.4.0",
+  version: "2.0.0",
   requiredVersion: "0.0.1",
-  description: "首页加载时检查间隔，到期后从指定 Emby 资源库随机模拟观看一次。",
+  description: "先保存 Emby 配置，再把首页保号检查添加到 Forward 首页；首页加载时到期才执行。",
   author: "Codex",
   site: "https://emby.media",
   detailCacheDuration: 0,
   modules: [
     {
-      id: "runKeepAlive",
-      title: "保号检查",
-      description: "适合放在 Forward 首页：每次加载先检查间隔，未到期不会请求 Emby。",
-      functionName: "runKeepAlive",
+      id: "saveConfig",
+      title: "保存配置",
+      description: "首次使用先运行这里；首页卡片会读取这份配置。",
+      functionName: "saveConfig",
       cacheDuration: 0,
       params: [
         {
@@ -25,12 +25,7 @@ WidgetMetadata = {
             { title: "http://192.168.1.2:8096", value: "http://192.168.1.2:8096" },
           ],
         },
-        {
-          name: "username",
-          title: "Emby 用户名",
-          type: "input",
-          description: "用于登录 Emby 的账号。",
-        },
+        { name: "username", title: "Emby 用户名", type: "input" },
         {
           name: "password",
           title: "Emby 密码",
@@ -53,7 +48,14 @@ WidgetMetadata = {
           title: "每隔多少小时执行",
           type: "count",
           value: "168",
-          description: "首页加载时检查；未到间隔只显示状态，不执行保号。168 小时约等于 7 天。",
+          description: "首页加载时检查；未到间隔只显示状态，不执行保号。",
+        },
+        {
+          name: "intervalJitterHours",
+          title: "间隔随机延迟（小时）",
+          type: "count",
+          value: "0",
+          description: "下次执行时间额外增加 0 到该值之间的随机小时数；0 表示关闭。",
         },
         {
           name: "playDuration",
@@ -70,17 +72,6 @@ WidgetMetadata = {
           enumOptions: [
             { title: "是", value: "true" },
             { title: "否", value: "false" },
-          ],
-        },
-        {
-          name: "forceRun",
-          title: "强制执行一次",
-          type: "enumeration",
-          value: "false",
-          description: "用于测试；选择“是”会忽略间隔。",
-          enumOptions: [
-            { title: "否", value: "false" },
-            { title: "是", value: "true" },
           ],
         },
         {
@@ -109,38 +100,69 @@ WidgetMetadata = {
           description: "随机资源为空时换库或换片重试。",
           belongTo: { paramName: "advanced", value: ["show"] },
         },
-        {
-          name: "intervalJitterHours",
-          title: "间隔随机延迟（小时）",
-          type: "count",
-          value: "0",
-          description: "下次执行时间额外增加 0 到该值之间的随机小时数；0 表示关闭。",
-          belongTo: { paramName: "advanced", value: ["show"] },
-        },
       ],
+    },
+    {
+      id: "homeCheck",
+      title: "首页保号检查",
+      description: "添加到 Forward 首页使用；无参数，自动读取已保存配置。",
+      functionName: "homeCheck",
+      cacheDuration: 0,
+      params: [],
+    },
+    {
+      id: "runOnce",
+      title: "立即执行一次",
+      description: "用于测试配置；无视间隔，读取已保存配置后立刻执行。",
+      functionName: "runOnce",
+      cacheDuration: 0,
+      params: [],
     },
   ],
 };
 
 const TICKS_PER_SECOND = 10000000;
+const CONFIG_KEY = "embyKeeper:config";
 const STORE_PREFIX = "embyKeeper";
 
 function cleanBaseUrl(url) {
   return String(url || "").trim().replace(/\/+$/, "");
 }
 
-function requireText(params, name, label) {
-  const value = String(params[name] || "").trim();
-  if (!value) throw new Error(`请填写${label}`);
-  return value;
+function requireText(value, label) {
+  const text = String(value || "").trim();
+  if (!text) throw new Error(`请填写${label}`);
+  return text;
 }
 
-function requireServerUrl(params) {
-  const value = requireText(params, "serverUrl", "Emby 服务器地址");
-  if (!/^https?:\/\//i.test(value)) {
+function normalizeConfig(params) {
+  const config = {
+    serverUrl: cleanBaseUrl(requireText(params.serverUrl, "Emby 服务器地址")),
+    username: requireText(params.username, "Emby 用户名"),
+    password: String(params.password || ""),
+    libraryName: String(params.libraryName || "").trim(),
+    intervalHours: String(numberParam(params.intervalHours, 168, 1)),
+    intervalJitterHours: String(numberParam(params.intervalJitterHours, 0, 0)),
+    playDuration: String(numberParam(params.playDuration, 300, 1)),
+    markWatched: boolParam(params.markWatched, true) ? "true" : "false",
+    deviceName: String(params.deviceName || "Forward").trim() || "Forward",
+    maxRetries: String(numberParam(params.maxRetries, 3, 1)),
+  };
+  if (!/^https?:\/\//i.test(config.serverUrl)) {
     throw new Error("Emby 服务器地址需要以 http:// 或 https:// 开头");
   }
-  return cleanBaseUrl(value);
+  if (!config.password) throw new Error("请填写Emby 密码");
+  return config;
+}
+
+function loadConfig() {
+  const raw = Widget.storage.get(CONFIG_KEY);
+  if (!raw) throw new Error("还没有保存配置。请先运行“保存配置”。");
+  try {
+    return normalizeConfig(JSON.parse(raw));
+  } catch (error) {
+    throw new Error(`配置读取失败：${error.message || error}`);
+  }
 }
 
 function numberParam(value, fallback, min) {
@@ -154,68 +176,64 @@ function boolParam(value, fallback) {
   return String(value).toLowerCase() === "true";
 }
 
-function getDeviceName(params) {
-  return String(params.deviceName || "Forward").trim() || "Forward";
+function getDeviceName(config) {
+  return String(config.deviceName || "Forward").trim() || "Forward";
 }
 
-function deviceId(params) {
-  return getDeviceName(params).replace(/\s+/g, "-");
+function deviceId(config) {
+  return getDeviceName(config).replace(/\s+/g, "-");
 }
 
-function authHeader(params, token) {
+function authHeader(config, token) {
   const parts = [
     'MediaBrowser Client="Forward"',
-    `Device="${getDeviceName(params)}"`,
-    `DeviceId="${deviceId(params)}"`,
+    `Device="${getDeviceName(config)}"`,
+    `DeviceId="${deviceId(config)}"`,
     'Version="1.0.0"',
   ];
   if (token) parts.push(`Token="${token}"`);
   return parts.join(", ");
 }
 
-function embyHeaders(params, token) {
+function embyHeaders(config, token) {
   return {
     Accept: "application/json, text/plain, */*",
     "Content-Type": "application/json",
     "X-Emby-Client": "Forward",
-    "X-Emby-Device-Name": getDeviceName(params),
-    "X-Emby-Device-Id": deviceId(params),
+    "X-Emby-Device-Name": getDeviceName(config),
+    "X-Emby-Device-Id": deviceId(config),
     "X-Emby-Client-Version": "1.0.0",
-    "X-Emby-Authorization": authHeader(params, token),
+    "X-Emby-Authorization": authHeader(config, token),
   };
 }
 
-function urlFor(params, path) {
-  const baseUrl = requireServerUrl(params);
-  return `${baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
+function urlFor(config, path) {
+  return `${config.serverUrl}${path.startsWith("/") ? "" : "/"}${path}`;
 }
 
-async function embyGet(params, path, token) {
-  const res = await Widget.http.get(urlFor(params, path), {
-    headers: embyHeaders(params, token),
+async function embyGet(config, path, token) {
+  const res = await Widget.http.get(urlFor(config, path), {
+    headers: embyHeaders(config, token),
   });
   return res.data;
 }
 
-async function embyPost(params, path, body, token) {
-  const res = await Widget.http.post(urlFor(params, path), body || {}, {
-    headers: embyHeaders(params, token),
+async function embyPost(config, path, body, token) {
+  const res = await Widget.http.post(urlFor(config, path), body || {}, {
+    headers: embyHeaders(config, token),
   });
   return res.data;
 }
 
-async function authenticate(params) {
-  requireServerUrl(params);
-  requireText(params, "username", "Emby 用户名");
-  requireText(params, "password", "Emby 密码");
-  return embyPost(params, "/Users/AuthenticateByName", {
-    Username: String(params.username || "").trim(),
-    Pw: String(params.password || ""),
+async function authenticate(config) {
+  return embyPost(config, "/Users/AuthenticateByName", {
+    Username: config.username,
+    Pw: config.password,
   });
 }
 
-async function getLibraries(params, auth) {
-  const data = await embyGet(params, `/Users/${auth.User.Id}/Views`, auth.AccessToken);
+async function getLibraries(config, auth) {
+  const data = await embyGet(config, `/Users/${auth.User.Id}/Views`, auth.AccessToken);
   const items = data.Items || [];
   return items.filter((item) => {
     const type = String(item.CollectionType || "");
@@ -223,8 +241,8 @@ async function getLibraries(params, auth) {
   });
 }
 
-function filterLibraries(libraries, params) {
-  const keyword = String(params.libraryName || "").trim().toLowerCase();
+function filterLibraries(libraries, config) {
+  const keyword = String(config.libraryName || "").trim().toLowerCase();
   if (!keyword) return libraries;
   return libraries.filter((library) => String(library.Name || "").toLowerCase().includes(keyword));
 }
@@ -234,15 +252,14 @@ function pickOne(items) {
   return items[Math.floor(Math.random() * items.length)];
 }
 
-function storageKey(params) {
-  const server = cleanBaseUrl(params.serverUrl).replace(/^https?:\/\//i, "");
-  const user = String(params.username || "").trim();
-  const library = String(params.libraryName || "all").trim() || "all";
-  return `${STORE_PREFIX}:${server}:${user}:${library}`;
+function storageKey(config) {
+  const server = cleanBaseUrl(config.serverUrl).replace(/^https?:\/\//i, "");
+  const library = String(config.libraryName || "all").trim() || "all";
+  return `${STORE_PREFIX}:${server}:${config.username}:${library}`;
 }
 
-function jitterStorageKey(params) {
-  return `${storageKey(params)}:nextDue`;
+function nextDueKey(config) {
+  return `${storageKey(config)}:nextDue`;
 }
 
 function formatTime(ms) {
@@ -264,19 +281,19 @@ function statusItem(id, title, description, extra) {
   }, extra || {});
 }
 
-function itemImageUrl(params, item, token) {
+function itemImageUrl(config, item, token) {
   if (!item || !item.Id || !item.ImageTags || !item.ImageTags.Primary) return undefined;
-  return `${cleanBaseUrl(params.serverUrl)}/Items/${item.Id}/Images/Primary?api_key=${encodeURIComponent(token)}`;
+  return `${config.serverUrl}/Items/${item.Id}/Images/Primary?api_key=${encodeURIComponent(token)}`;
 }
 
-async function getRandomItem(params, auth, libraries) {
-  const selected = filterLibraries(libraries, params);
+async function getRandomItem(config, auth, libraries) {
+  const selected = filterLibraries(libraries, config);
   if (!selected.length) {
     const names = libraries.map((library) => library.Name).filter(Boolean).join(" / ");
     throw new Error(`没有匹配的资源库。当前可用资源库：${names || "无"}`);
   }
 
-  const retries = numberParam(params.maxRetries, 3, 1);
+  const retries = numberParam(config.maxRetries, 3, 1);
   for (let i = 0; i < retries; i++) {
     const library = pickOne(selected);
     const query = [
@@ -287,7 +304,7 @@ async function getRandomItem(params, auth, libraries) {
       "Fields=MediaSources,RunTimeTicks,SeriesName,ParentIndexNumber,IndexNumber,ImageTags",
       `ParentId=${encodeURIComponent(library.Id)}`,
     ].join("&");
-    const data = await embyGet(params, `/Users/${auth.User.Id}/Items?${query}`, auth.AccessToken);
+    const data = await embyGet(config, `/Users/${auth.User.Id}/Items?${query}`, auth.AccessToken);
     const item = data.Items && data.Items[0];
     if (item) return { library, item };
   }
@@ -295,9 +312,9 @@ async function getRandomItem(params, auth, libraries) {
   throw new Error("没有找到可模拟观看的影片。可以清空资源库名称，或提高最大重试次数。");
 }
 
-async function reportPlayback(params, auth, item) {
+async function reportPlayback(config, auth, item) {
   const token = auth.AccessToken;
-  const playDuration = numberParam(params.playDuration, 300, 1);
+  const playDuration = numberParam(config.playDuration, 300, 1);
   const runtimeSeconds = item.RunTimeTicks ? Math.floor(item.RunTimeTicks / TICKS_PER_SECOND) : 0;
   const startRatio = 0.05 + Math.random() * 0.05;
   const startSeconds = runtimeSeconds > 0 ? Math.floor(runtimeSeconds * startRatio) : 0;
@@ -313,7 +330,7 @@ async function reportPlayback(params, auth, item) {
     : item.Id;
   const playSessionId = `forward-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 
-  await embyPost(params, "/Sessions/Playing", {
+  await embyPost(config, "/Sessions/Playing", {
     ItemId: item.Id,
     MediaSourceId: mediaSourceId,
     PlaySessionId: playSessionId,
@@ -322,7 +339,7 @@ async function reportPlayback(params, auth, item) {
     CanSeek: true,
   }, token);
 
-  await embyPost(params, "/Sessions/Playing/Progress", {
+  await embyPost(config, "/Sessions/Playing/Progress", {
     ItemId: item.Id,
     MediaSourceId: mediaSourceId,
     PlaySessionId: playSessionId,
@@ -330,75 +347,118 @@ async function reportPlayback(params, auth, item) {
     IsPaused: false,
   }, token);
 
-  await embyPost(params, "/Sessions/Playing/Stopped", {
+  await embyPost(config, "/Sessions/Playing/Stopped", {
     ItemId: item.Id,
     MediaSourceId: mediaSourceId,
     PlaySessionId: playSessionId,
     PositionTicks: endSeconds * TICKS_PER_SECOND,
   }, token);
 
-  if (boolParam(params.markWatched, true)) {
-    await embyPost(params, `/Users/${auth.User.Id}/PlayedItems/${item.Id}`, {}, token);
+  if (boolParam(config.markWatched, true)) {
+    await embyPost(config, `/Users/${auth.User.Id}/PlayedItems/${item.Id}`, {}, token);
   }
 
   return { runtimeSeconds, startSeconds, endSeconds, watchedSeconds };
 }
 
-async function runKeepAlive(params = {}) {
-  try {
-    const now = Date.now();
-    const key = storageKey(params);
-    const nextDueKey = jitterStorageKey(params);
-    const intervalHours = numberParam(params.intervalHours, 168, 1);
-    const intervalMs = intervalHours * 60 * 60 * 1000;
-    const lastRun = Number(Widget.storage.get(key) || 0);
-    const storedNextDue = Number(Widget.storage.get(nextDueKey) || 0);
-    const nextDue = storedNextDue || (lastRun ? lastRun + intervalMs : 0);
-    const forceRun = boolParam(params.forceRun, false);
-    const targetLibrary = String(params.libraryName || "全部资源库").trim() || "全部资源库";
+function nextDueFromConfig(config, now) {
+  const intervalMs = numberParam(config.intervalHours, 168, 1) * 60 * 60 * 1000;
+  const jitterHours = numberParam(config.intervalJitterHours, 0, 0);
+  const jitterMs = jitterHours > 0 ? Math.floor(Math.random() * jitterHours * 60 * 60 * 1000) : 0;
+  return {
+    intervalMs,
+    jitterMs,
+    nextDue: now + intervalMs + jitterMs,
+  };
+}
 
-    if (!forceRun && nextDue > 0 && now < nextDue) {
-      return [
-        statusItem("skipped", "保号未到时间", [
-          `资源库：${targetLibrary}`,
-          `上次执行：${formatTime(lastRun)}`,
-          `下次执行：${formatTime(nextDue)}`,
-          `执行间隔：${intervalHours} 小时`,
-          "首页已检查，本次不会请求 Emby。",
-        ].join("\n")),
-      ];
-    }
+async function executeKeepAlive(config, forceRun) {
+  const now = Date.now();
+  const lastKey = storageKey(config);
+  const dueKey = nextDueKey(config);
+  const lastRun = Number(Widget.storage.get(lastKey) || 0);
+  const storedNextDue = Number(Widget.storage.get(dueKey) || 0);
+  const intervalHours = numberParam(config.intervalHours, 168, 1);
+  const fallbackNextDue = lastRun ? lastRun + intervalHours * 60 * 60 * 1000 : 0;
+  const currentNextDue = storedNextDue || fallbackNextDue;
+  const targetLibrary = String(config.libraryName || "全部资源库").trim() || "全部资源库";
 
-    const auth = await authenticate(params);
-    const libraries = await getLibraries(params, auth);
-    const picked = await getRandomItem(params, auth, libraries);
-    const playback = await reportPlayback(params, auth, picked.item);
-    const jitterHours = numberParam(params.intervalJitterHours, 0, 0);
-    const jitterMs = jitterHours > 0 ? Math.floor(Math.random() * jitterHours * 60 * 60 * 1000) : 0;
-    const newNextDue = now + intervalMs + jitterMs;
-    Widget.storage.set(key, String(now));
-    Widget.storage.set(nextDueKey, String(newNextDue));
-
-    const title = picked.item.SeriesName
-      ? `${picked.item.SeriesName} - ${picked.item.Name || picked.item.Id}`
-      : `${picked.item.Name || picked.item.Id}`;
-    const posterPath = itemImageUrl(params, picked.item, auth.AccessToken);
-
+  if (!forceRun && currentNextDue > 0 && now < currentNextDue) {
     return [
-      statusItem(`item:${picked.item.Id}`, `保号完成：${title}`, [
-        `账号：${auth.User.Name || params.username}`,
-        `资源库：${picked.library.Name || picked.library.Id}`,
-        `模拟观看：${playback.watchedSeconds} 秒`,
-        `播放区间：${playback.startSeconds}s - ${playback.endSeconds}s`,
-        `标记已看：${boolParam(params.markWatched, true) ? "是" : "否"}`,
-        `本次执行：${formatTime(now)}`,
+      statusItem("skipped", "保号未到时间", [
+        `资源库：${targetLibrary}`,
+        `上次执行：${formatTime(lastRun)}`,
+        `下次执行：${formatTime(currentNextDue)}`,
         `执行间隔：${intervalHours} 小时`,
-        `随机延迟：${Math.round(jitterMs / 60000)} 分钟`,
-        `下次执行：${formatTime(newNextDue)}`,
-      ].join("\n"), posterPath ? { posterPath } : {}),
+        "首页已检查，本次不会请求 Emby。",
+      ].join("\n")),
+    ];
+  }
+
+  const auth = await authenticate(config);
+  const libraries = await getLibraries(config, auth);
+  const picked = await getRandomItem(config, auth, libraries);
+  const playback = await reportPlayback(config, auth, picked.item);
+  const schedule = nextDueFromConfig(config, now);
+  Widget.storage.set(lastKey, String(now));
+  Widget.storage.set(dueKey, String(schedule.nextDue));
+
+  const title = picked.item.SeriesName
+    ? `${picked.item.SeriesName} - ${picked.item.Name || picked.item.Id}`
+    : `${picked.item.Name || picked.item.Id}`;
+  const posterPath = itemImageUrl(config, picked.item, auth.AccessToken);
+
+  return [
+    statusItem(`item:${picked.item.Id}`, `保号完成：${title}`, [
+      `账号：${auth.User.Name || config.username}`,
+      `资源库：${picked.library.Name || picked.library.Id}`,
+      `模拟观看：${playback.watchedSeconds} 秒`,
+      `播放区间：${playback.startSeconds}s - ${playback.endSeconds}s`,
+      `标记已看：${boolParam(config.markWatched, true) ? "是" : "否"}`,
+      `本次执行：${formatTime(now)}`,
+      `执行间隔：${intervalHours} 小时`,
+      `随机延迟：${Math.round(schedule.jitterMs / 60000)} 分钟`,
+      `下次执行：${formatTime(schedule.nextDue)}`,
+    ].join("\n"), posterPath ? { posterPath } : {}),
+  ];
+}
+
+async function saveConfig(params = {}) {
+  try {
+    const config = normalizeConfig(params);
+    Widget.storage.set(CONFIG_KEY, JSON.stringify(config));
+    const targetLibrary = config.libraryName || "全部资源库";
+    return [
+      statusItem("config-saved", "配置已保存", [
+        `服务器：${config.serverUrl}`,
+        `账号：${config.username}`,
+        `资源库：${targetLibrary}`,
+        `执行间隔：${config.intervalHours} 小时`,
+        `随机延迟：0-${config.intervalJitterHours} 小时`,
+        `播放时长：${config.playDuration} 秒 + 0-10% 随机`,
+        "现在可以把“首页保号检查”添加到 Forward 首页。",
+      ].join("\n")),
     ];
   } catch (error) {
-    console.error("[embyKeeper] failed:", error.message || error);
+    console.error("[embyKeeper] save config failed:", error.message || error);
+    throw error;
+  }
+}
+
+async function homeCheck() {
+  try {
+    return executeKeepAlive(loadConfig(), false);
+  } catch (error) {
+    console.error("[embyKeeper] home check failed:", error.message || error);
+    throw error;
+  }
+}
+
+async function runOnce() {
+  try {
+    return executeKeepAlive(loadConfig(), true);
+  } catch (error) {
+    console.error("[embyKeeper] run once failed:", error.message || error);
     throw error;
   }
 }
@@ -407,6 +467,6 @@ async function loadDetail(link) {
   return statusItem(
     String(link || "help"),
     "Emby 自动保号",
-    "放在 Forward 首页时，每次首页加载会检查间隔；未到期不会请求 Emby。"
+    "先运行“保存配置”，再把“首页保号检查”添加到 Forward 首页。"
   );
 }
