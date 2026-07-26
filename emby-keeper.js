@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "embyKeeper",
   title: "Emby 自动保号",
-  version: "2.1.0",
+  version: "2.2.0",
   requiredVersion: "0.0.1",
   description: "先保存 Emby 配置，再把首页保号检查添加到 Forward 首页；首页加载时到期才执行。",
   author: "Codex",
@@ -104,6 +104,14 @@ WidgetMetadata = {
         },
       ],
     },
+    {
+      id: "runOnce",
+      title: "\u7acb\u5373\u6267\u884c\u4e00\u6b21",
+      description: "\u7528\u5f53\u524d\u586b\u5199\u7684\u8d26\u53f7\u7acb\u5373\u6d4b\u8bd5\uff0c\u5ffd\u7565\u4e0a\u6b21\u6267\u884c\u65f6\u95f4\u548c\u95f4\u9694\u3002",
+      functionName: "runOnce",
+      cacheDuration: 0,
+      params: [],
+    },
   ],
   legacyModules: [
     {
@@ -124,6 +132,8 @@ WidgetMetadata = {
     },
   ],
 };
+
+WidgetMetadata.modules[1].params = WidgetMetadata.modules[0].params;
 
 const TICKS_PER_SECOND = 10000000;
 const CONFIG_KEY = "embyKeeper:config";
@@ -459,9 +469,11 @@ async function homeCheck() {
   }
 }
 
-async function runOnce() {
+async function runOnce(params = {}) {
   try {
-    return executeKeepAlive(loadConfig(), true);
+    const config = normalizeConfig(params);
+    Widget.storage.set(CONFIG_KEY, JSON.stringify(config));
+    return executeKeepAlive(config, true);
   } catch (error) {
     console.error("[embyKeeper] run once failed:", error.message || error);
     throw error;
