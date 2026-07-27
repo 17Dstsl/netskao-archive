@@ -1,20 +1,18 @@
 WidgetMetadata = {
   id: "embyKeeper",
   title: "Emby 自动保号",
-  version: "2.2.0",
+  version: "2.3.0",
   requiredVersion: "0.0.1",
-  description: "先保存 Emby 配置，再把首页保号检查添加到 Forward 首页；首页加载时到期才执行。",
   author: "Codex",
-  description: "\u53ea\u9700\u6dfb\u52a0\u201c\u4fdd\u5b58\u914d\u7f6e\u201d\u5230\u9996\u9875\uff1b\u9996\u9875\u52a0\u8f7d\u65f6\u4fdd\u5b58\u5f53\u524d\u53c2\u6570\uff0c\u5e76\u6309\u8bbe\u7f6e\u7684\u5c0f\u65f6\u95f4\u9694\u81ea\u52a8\u68c0\u67e5\u4fdd\u53f7\u3002",
+  description: "把“保存配置”添加到首页；首页加载时按间隔自动检查，并显示最近的保号观看记录。",
   site: "https://emby.media",
   detailCacheDuration: 0,
   modules: [
     {
       id: "saveConfig",
       title: "保存配置",
-      description: "首次使用先运行这里；首页卡片会读取这份配置。",
       functionName: "saveConfig",
-      description: "\u6b64\u6a21\u5757\u540c\u65f6\u662f\u914d\u7f6e\u5165\u53e3\u548c\u9996\u9875\u81ea\u52a8\u68c0\u67e5\uff1b\u6dfb\u52a0\u540e\u53ef\u5728\u201c\u4fee\u6539\u6570\u636e\u6e90\u201d\u4e2d\u8c03\u6574\u6240\u6709\u53c2\u6570\u3002",
+      description: "配置、自动检查和立即测试都在这里；首页会保留最近的观看记录。",
       cacheDuration: 0,
       params: [
         {
@@ -77,6 +75,17 @@ WidgetMetadata = {
           ],
         },
         {
+          name: "executionMode",
+          title: "执行方式",
+          type: "enumeration",
+          value: "auto",
+          description: "立即执行只触发一次；需要再次测试时，先切回自动并保存，再重新选择立即执行。",
+          enumOptions: [
+            { title: "按间隔自动检查", value: "auto" },
+            { title: "立即执行一次", value: "once" },
+          ],
+        },
+        {
           name: "advanced",
           title: "高级设置",
           type: "enumeration",
@@ -104,39 +113,10 @@ WidgetMetadata = {
         },
       ],
     },
-    {
-      id: "runOnce",
-      title: "\u7acb\u5373\u6267\u884c\u4e00\u6b21",
-      description: "\u7528\u5f53\u524d\u586b\u5199\u7684\u8d26\u53f7\u7acb\u5373\u6d4b\u8bd5\uff0c\u5ffd\u7565\u4e0a\u6b21\u6267\u884c\u65f6\u95f4\u548c\u95f4\u9694\u3002",
-      functionName: "runOnce",
-      cacheDuration: 0,
-      params: [],
-    },
-  ],
-  legacyModules: [
-    {
-      id: "homeCheck",
-      title: "首页保号检查",
-      description: "添加到 Forward 首页使用；无参数，自动读取已保存配置。",
-      functionName: "homeCheck",
-      cacheDuration: 0,
-      params: [],
-    },
-    {
-      id: "runOnce",
-      title: "立即执行一次",
-      description: "用于测试配置；无视间隔，读取已保存配置后立刻执行。",
-      functionName: "runOnce",
-      cacheDuration: 0,
-      params: [],
-    },
   ],
 };
 
-WidgetMetadata.modules[1].params = WidgetMetadata.modules[0].params;
-
 const TICKS_PER_SECOND = 10000000;
-const CONFIG_KEY = "embyKeeper:config";
 const STORE_PREFIX = "embyKeeper";
 
 function cleanBaseUrl(url) {
@@ -159,6 +139,7 @@ function normalizeConfig(params) {
     intervalJitterHours: String(numberParam(params.intervalJitterHours, 0, 0)),
     playDuration: String(numberParam(params.playDuration, 300, 1)),
     markWatched: boolParam(params.markWatched, true) ? "true" : "false",
+    executionMode: String(params.executionMode || "auto") === "once" ? "once" : "auto",
     deviceName: String(params.deviceName || "Forward").trim() || "Forward",
     maxRetries: String(numberParam(params.maxRetries, 3, 1)),
   };
@@ -167,16 +148,6 @@ function normalizeConfig(params) {
   }
   if (!config.password) throw new Error("请填写Emby 密码");
   return config;
-}
-
-function loadConfig() {
-  const raw = Widget.storage.get(CONFIG_KEY);
-  if (!raw) throw new Error("还没有保存配置。请先运行“保存配置”。");
-  try {
-    return normalizeConfig(JSON.parse(raw));
-  } catch (error) {
-    throw new Error(`配置读取失败：${error.message || error}`);
-  }
 }
 
 function numberParam(value, fallback, min) {
@@ -274,6 +245,45 @@ function storageKey(config) {
 
 function nextDueKey(config) {
   return `${storageKey(config)}:${config.intervalHours}:${config.intervalJitterHours}:nextDue`;
+}
+
+function historyKey(config) {
+  return `${storageKey(config)}:history`;
+}
+
+function forceOnceKey(config) {
+  return `${storageKey(config)}:forceOnceConsumed`;
+}
+
+function loadHistory(config) {
+  const raw = Widget.storage.get(historyKey(config));
+  if (!raw) return [];
+  try {
+    const records = JSON.parse(raw);
+    return Array.isArray(records) ? records : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveHistoryRecord(config, record) {
+  const records = [record, ...loadHistory(config)].slice(0, 20);
+  Widget.storage.set(historyKey(config), JSON.stringify(records));
+}
+
+function historyItems(config) {
+  return loadHistory(config).slice(0, 10).map((record) => statusItem(
+    `history:${record.time}:${record.itemId}`,
+    `观看记录：${record.title}`,
+    [
+      `账号：${record.account}`,
+      `资源库：${record.library}`,
+      `模拟观看：${record.watchedSeconds} 秒`,
+      `播放区间：${record.startSeconds}s - ${record.endSeconds}s`,
+      `标记已看：${record.markWatched ? "是" : "否"}`,
+      `执行时间：${formatTime(record.time)}`,
+    ].join("\n")
+  ));
 }
 
 function formatTime(ms) {
@@ -406,6 +416,7 @@ async function executeKeepAlive(config, forceRun) {
         `执行间隔：${intervalHours} 小时`,
         "首页已检查，本次不会请求 Emby。",
       ].join("\n")),
+      ...historyItems(config),
     ];
   }
 
@@ -421,11 +432,24 @@ async function executeKeepAlive(config, forceRun) {
     ? `${picked.item.SeriesName} - ${picked.item.Name || picked.item.Id}`
     : `${picked.item.Name || picked.item.Id}`;
   const posterPath = itemImageUrl(config, picked.item, auth.AccessToken);
+  const account = auth.User.Name || config.username;
+  const library = picked.library.Name || picked.library.Id;
+  saveHistoryRecord(config, {
+    time: now,
+    itemId: picked.item.Id,
+    title,
+    account,
+    library,
+    watchedSeconds: playback.watchedSeconds,
+    startSeconds: playback.startSeconds,
+    endSeconds: playback.endSeconds,
+    markWatched: boolParam(config.markWatched, true),
+  });
 
   return [
     statusItem(`item:${picked.item.Id}`, `保号完成：${title}`, [
-      `账号：${auth.User.Name || config.username}`,
-      `资源库：${picked.library.Name || picked.library.Id}`,
+      `账号：${account}`,
+      `资源库：${library}`,
       `模拟观看：${playback.watchedSeconds} 秒`,
       `播放区间：${playback.startSeconds}s - ${playback.endSeconds}s`,
       `标记已看：${boolParam(config.markWatched, true) ? "是" : "否"}`,
@@ -434,48 +458,28 @@ async function executeKeepAlive(config, forceRun) {
       `随机延迟：${Math.round(schedule.jitterMs / 60000)} 分钟`,
       `下次执行：${formatTime(schedule.nextDue)}`,
     ].join("\n"), posterPath ? { posterPath } : {}),
+    ...historyItems(config).slice(1),
   ];
 }
 
 async function saveConfig(params = {}) {
   try {
     const config = normalizeConfig(params);
-    Widget.storage.set(CONFIG_KEY, JSON.stringify(config));
-    return executeKeepAlive(config, false);
-    const targetLibrary = config.libraryName || "全部资源库";
-    return [
-      statusItem("config-saved", "配置已保存", [
-        `服务器：${config.serverUrl}`,
-        `账号：${config.username}`,
-        `资源库：${targetLibrary}`,
-        `执行间隔：${config.intervalHours} 小时`,
-        `随机延迟：0-${config.intervalJitterHours} 小时`,
-        `播放时长：${config.playDuration} 秒 + 0-10% 随机`,
-        "现在可以把“首页保号检查”添加到 Forward 首页。",
-      ].join("\n")),
-    ];
+    const wantsForceRun = config.executionMode === "once";
+    const consumedKey = forceOnceKey(config);
+    const forceRun = wantsForceRun && Widget.storage.get(consumedKey) !== "1";
+
+    if (!wantsForceRun) {
+      Widget.storage.set(consumedKey, "0");
+    }
+
+    const result = await executeKeepAlive(config, forceRun);
+    if (forceRun) {
+      Widget.storage.set(consumedKey, "1");
+    }
+    return result;
   } catch (error) {
     console.error("[embyKeeper] save config failed:", error.message || error);
-    throw error;
-  }
-}
-
-async function homeCheck() {
-  try {
-    return executeKeepAlive(loadConfig(), false);
-  } catch (error) {
-    console.error("[embyKeeper] home check failed:", error.message || error);
-    throw error;
-  }
-}
-
-async function runOnce(params = {}) {
-  try {
-    const config = normalizeConfig(params);
-    Widget.storage.set(CONFIG_KEY, JSON.stringify(config));
-    return executeKeepAlive(config, true);
-  } catch (error) {
-    console.error("[embyKeeper] run once failed:", error.message || error);
     throw error;
   }
 }
@@ -484,6 +488,6 @@ async function loadDetail(link) {
   return statusItem(
     String(link || "help"),
     "Emby 自动保号",
-    "先运行“保存配置”，再把“首页保号检查”添加到 Forward 首页。"
+    "把“保存配置”添加到首页；它会按间隔自动保号，并显示最近的观看记录。"
   );
 }
