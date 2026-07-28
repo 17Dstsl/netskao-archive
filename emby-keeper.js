@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "embyKeeper",
   title: "Emby 自动保号",
-  version: "2.3.0",
+  version: "2.4.0",
   requiredVersion: "0.0.1",
   author: "Codex",
   description: "把“保存配置”添加到首页；首页加载时按间隔自动检查，并显示最近的保号观看记录。",
@@ -99,7 +99,7 @@ WidgetMetadata = {
           name: "deviceName",
           title: "设备名称",
           type: "input",
-          value: "Forward",
+          value: "Mac",
           description: "显示在 Emby 后台的设备名。",
           belongTo: { paramName: "advanced", value: ["show"] },
         },
@@ -140,7 +140,7 @@ function normalizeConfig(params) {
     playDuration: String(numberParam(params.playDuration, 300, 1)),
     markWatched: boolParam(params.markWatched, true) ? "true" : "false",
     executionMode: String(params.executionMode || "auto") === "once" ? "once" : "auto",
-    deviceName: String(params.deviceName || "Forward").trim() || "Forward",
+    deviceName: String(params.deviceName || "Mac").trim() || "Mac",
     maxRetries: String(numberParam(params.maxRetries, 3, 1)),
   };
   if (!/^https?:\/\//i.test(config.serverUrl)) {
@@ -162,7 +162,7 @@ function boolParam(value, fallback) {
 }
 
 function getDeviceName(config) {
-  return String(config.deviceName || "Forward").trim() || "Forward";
+  return String(config.deviceName || "Mac").trim() || "Mac";
 }
 
 function deviceId(config) {
@@ -282,7 +282,8 @@ function historyItems(config) {
       `播放区间：${record.startSeconds}s - ${record.endSeconds}s`,
       `标记已看：${record.markWatched ? "是" : "否"}`,
       `执行时间：${formatTime(record.time)}`,
-    ].join("\n")
+    ].join("\n"),
+    record.posterPath ? { posterPath: record.posterPath, backdropPath: record.posterPath } : {}
   ));
 }
 
@@ -306,8 +307,11 @@ function statusItem(id, title, description, extra) {
 }
 
 function itemImageUrl(config, item, token) {
-  if (!item || !item.Id || !item.ImageTags || !item.ImageTags.Primary) return undefined;
-  return `${config.serverUrl}/Items/${item.Id}/Images/Primary?api_key=${encodeURIComponent(token)}`;
+  if (!item || !item.Id) return undefined;
+  const tag = item.ImageTags && item.ImageTags.Primary
+    ? `&tag=${encodeURIComponent(item.ImageTags.Primary)}`
+    : "";
+  return `${config.serverUrl}/Items/${item.Id}/Images/Primary?fillHeight=450&fillWidth=300&quality=90&api_key=${encodeURIComponent(token)}${tag}`;
 }
 
 async function getRandomItem(config, auth, libraries) {
@@ -444,6 +448,7 @@ async function executeKeepAlive(config, forceRun) {
     startSeconds: playback.startSeconds,
     endSeconds: playback.endSeconds,
     markWatched: boolParam(config.markWatched, true),
+    posterPath,
   });
 
   return [
@@ -457,7 +462,7 @@ async function executeKeepAlive(config, forceRun) {
       `执行间隔：${intervalHours} 小时`,
       `随机延迟：${Math.round(schedule.jitterMs / 60000)} 分钟`,
       `下次执行：${formatTime(schedule.nextDue)}`,
-    ].join("\n"), posterPath ? { posterPath } : {}),
+    ].join("\n"), posterPath ? { posterPath, backdropPath: posterPath } : {}),
     ...historyItems(config).slice(1),
   ];
 }
